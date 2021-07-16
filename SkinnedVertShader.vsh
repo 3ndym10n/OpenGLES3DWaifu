@@ -23,13 +23,15 @@
 	will not work properly in clip space.
 */
 
-in highp vec3 inVertex;
-in mediump vec3 inNormal;
-in mediump vec3 inTangent;
-in mediump vec3 inBiNormal;
-in mediump vec2 inTexCoord;
-in highp vec4 inBoneWeights;
-in highp vec4 inBoneIndex;
+layout(location=0) in highp vec3 inVertex;
+layout(location=1) in highp vec3 inNormal;
+layout(location=2) in highp vec3 inTangent;
+layout(location=3) in highp vec3 inBiNormal;
+layout(location=4) in highp vec2 inTexCoord;
+layout(location=5) in highp vec4 inBoneWeights;
+layout(location=6) in highp vec4 inBoneIndex;
+// layout(location=5) in highp float inBoneWeights;
+// layout(location=6) in highp uint inBoneIndex;
 
 struct Bone{
 	highp mat4 boneMatrix;
@@ -47,17 +49,27 @@ layout (std140, binding = 0) buffer MyBBlock
     Bone bones[];
 };
 
+uniform int BoneCount;	// 每vertex受几个bone影响
+
 out highp vec3 vLight;
 out mediump vec2 vTexCoord;
 
 out highp vec3 worldPosition;
 out mediump float vOneOverAttenuation;
 
+out highp vec3 transPos;	//未归一化的世界三维坐标
+out highp vec3 LightPosition;
+out highp   vec3 transNormal;
+
+const highp vec3 LP=vec3(1000.0);
+
 void main()
 {
 	// On PowerVR GPUs it is possible to index the components of a vector
 	// with the [] operator. However this can cause trouble with PC
 	// emulation on some hardware so we "rotate" the vectors instead.
+	// mediump ivec4 boneIndex = ivec4(inBoneIndex);
+	// mediump vec4 boneWeights = inBoneWeights;
 	mediump ivec4 boneIndex = ivec4(inBoneIndex);
 	mediump vec4 boneWeights = inBoneWeights;
 
@@ -67,7 +79,7 @@ void main()
 	highp vec4 position = vec4(0, 0, 0, 0);
 	mediump vec3 worldNormal = vec3(0, 0, 0);
 
-	for (mediump int i = 0; i < 4; ++i)
+	for (mediump int i = 0; i < BoneCount; ++i)
 	{
 		Bone b = bones[boneIndex.x];
 		position += b.boneMatrix * vec4(inVertex, 1.0) * boneWeights.x;
@@ -76,21 +88,27 @@ void main()
 		worldTangent += b.boneMatrixIT * inTangent * boneWeights.x;
 		worldBiNormal += b.boneMatrixIT * inBiNormal * boneWeights.x;
 
-		// "rotate" the vector components
+		// "rotate" the vector components 不断循环位移
 		boneIndex = boneIndex.yzwx;
 		boneWeights = boneWeights.yzwx;
+		// boneIndex = boneIndex.yzx;
+		// boneWeights = boneWeights.yzx;
 	}
+	transPos=position.xyz;	//未归一化的世界三维坐标
 
 	worldPosition = position.xyz / position.w;
 
 	gl_Position = ViewProjMatrix * position;
+	// gl_Position = ViewProjMatrix * vec4(inVertex, 1.0);
 
 	// lighting
-	mediump vec3 tmpLightDir = LightPos - position.xyz;
+	mediump vec3 tmpLightDir = LP - position.xyz;
 	mediump float light_distance = length(tmpLightDir);
 	tmpLightDir /= light_distance;
-
-	vOneOverAttenuation = 1.0 / (1.0 + 0.00005 * light_distance * light_distance);
+	LightPosition=LP;
+	
+	// 光线衰减
+	vOneOverAttenuation = 1.0 / (1.0 + 0.05 * light_distance+0.0005 * light_distance * light_distance);
 
 	vLight.x = dot(normalize(worldTangent), tmpLightDir);
 	vLight.y = dot(normalize(worldBiNormal), tmpLightDir);

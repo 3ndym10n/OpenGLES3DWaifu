@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 
 add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/source-charset:utf-8>")
 
+# add_definitions(-DGL_BGRA_EXT)
+
 project("OpenGLES3DWaifu")
 set(PVR_SDK_DIRECTORY "d:/Program Files/Native_SDK-R21.1-v5.7")
 
@@ -10,6 +12,7 @@ target_include_directories(OpenGLES3DWaifu PUBLIC
             "${PVR_SDK_DIRECTORY}/framework"
             "${PVR_SDK_DIRECTORY}/include"
             "${PVR_SDK_DIRECTORY}/build/external/glm/src"
+            # "${PVR_SDK_DIRECTORY}/include/GLES2/gl2ext.h"
             )
 target_link_libraries(OpenGLES3DWaifu PUBLIC
 "${PVR_SDK_DIRECTORY}/build/framework/PVRCore/Debug/PVRCore.lib"

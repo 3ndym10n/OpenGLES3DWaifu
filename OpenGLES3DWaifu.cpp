@@ -7,15 +7,22 @@
 #include "PVRShell/PVRShell.h"
 #include "PVRUtils/PVRUtilsGles.h"
 #include "PVRUtils/OpenGLES/ModelGles.h"
+// #include "d:\Program Files\Native_SDK-R21.1-v5.7\include\GLES2\gl2ext.h"
 #include <fstream>
 #include <iomanip>
+//#define GL_BGRA_EXT
+// #define GLTF_SCENE_FILE
+
+#ifdef GLTF_SCENE_FILE
+const glm::vec3 lightpostion = glm::vec3(2, 2, -1);
+#endif
 
 namespace Configuration
 {
 	const char EffectFile[] = "Skinning.pfx";
 
-	// POD scene files
-	const char SceneFile[] = "test1.pod";
+	// scene files 格式只能为 pod gltf
+	const char SceneFile[] = "test28.pod";
 
 	const char *DefaultVertShaderFile = "DefaultVertShader.vsh";
 	const char *DefaultFragShaderFile = "DefaultFragShader.fsh";
@@ -26,12 +33,15 @@ namespace Configuration
 	const pvr::StringHash DefaultAttributeSemantics[] = {"POSITION", "NORMAL", "UV0"}; //语义
 	const uint16_t DefaultAttributeIndices[] = {0, 1, 2};
 	const char *SkinnedAttributeNames[] = {"inVertex", "inNormal", "inTangent", "inBiNormal", "inTexCoord", "inBoneWeights", "inBoneIndex"};
+	// const char *SkinnedAttributeNames[] = {"inVertex", "inNormal", "inTangent", "inBiNormal", "inTexCoord", "inBoneIndex", "inBoneWeights"};
 	const pvr::StringHash SkinnedAttributeSemantics[] = {"POSITION", "NORMAL", "TANGENT", "BINORMAL", "UV0", "BONEWEIGHT", "BONEINDEX"};
+	// const pvr::StringHash SkinnedAttributeSemantics[] = {"POSITION", "NORMAL", "TANGENT", "BINORMAL", "UV0", "BONEINDEX", "BONEWEIGHT"};
 	const uint16_t SkinnedAttributeIndices[] = {0, 1, 2, 3, 4, 5, 6};
 
 	const char *DefaultUniformNames[] = {"ModelMatrix", "MVPMatrix", "ModelWorldIT3x3", "LightPos", "sTexture"};
 
-	const char *SkinnedUniformNames[] = {"ViewProjMatrix", "LightPos", "BoneCount", "BoneMatrixArray", "BoneMatrixArrayIT", "sTexture", "sNormalMap"};
+	// const char *SkinnedUniformNames[] = {"ViewProjMatrix", "LightPos", "BoneCount", "BoneMatrixArray", "BoneMatrixArrayIT", "sTexture", "sNormalMap"};
+	const char *SkinnedUniformNames[] = {"ViewProjMatrix", "LightPos", "BoneCount", "BoneMatrixArray", "BoneMatrixArrayIT", "sTexture"};
 } // namespace Configuration
 // 正好 count 的值就是 Uniforms 的个数，且各uniform对应自己的序号
 enum class SkinnedUniforms : uint32_t
@@ -42,7 +52,7 @@ enum class SkinnedUniforms : uint32_t
 	BoneMatrixArray,
 	BoneMatrixArrayIT,
 	TextureDiffuse,
-	TextureNormal,
+	// TextureNormal,
 	Count
 };
 enum class DefaultUniforms : uint32_t
@@ -154,6 +164,7 @@ void OpenGLES3DWaifu::eventMappedInput(pvr::SimplifiedInput action)
 pvr::Result OpenGLES3DWaifu::initApplication()
 {
 	// 这个模型文件里面包含了动画信息
+	// 读取 gltf 文件时貌似根本就没有针对light数据有收集整合
 	_scene = pvr::assets::loadModel(*this, Configuration::SceneFile);
 
 	// The cameras are stored in the file. We check it contains at least one.
@@ -163,12 +174,14 @@ pvr::Result OpenGLES3DWaifu::initApplication()
 		return pvr::Result::InitializationError;
 	}
 
-	// Check the _scene contains at least one light
+// Check the _scene contains at least one light
+#ifndef GLTF_SCENE_FILE
 	if (_scene->getNumLights() == 0)
 	{
 		setExitMessage("Error: The _scene does not contain a light.");
 		return pvr::Result::InitializationError;
 	}
+#endif
 
 	return pvr::Result::Success;
 }
@@ -216,9 +229,15 @@ pvr::Result OpenGLES3DWaifu::initView()
 		float fov, nearClip, farClip;										  //fov 表示视野大小 0-180
 		_scene->getCameraProperties(0, fov, from, to, up, nearClip, farClip); // vTo is calculated from the rotation
 
-		_projectionMatrix = pvr::math::perspective(pvr::Api::OpenGLES2, fov, static_cast<float>(getWidth()) / static_cast<float>(getHeight()), nearClip, farClip);
+		_projectionMatrix = pvr::math::perspective(pvr::Api::OpenGLES31, fov, static_cast<float>(getWidth()) / static_cast<float>(getHeight()), nearClip, farClip);
 	}
 
+	/* 
+	 * 模型初始化
+	 * 其中会载入并存储纹理 TexStorage2D
+	 * 纹理格式只能为：
+	 * 纹理编码有限定，不能是 GL_BGRA_EXT(BGRA8888)
+	 */
 	_deviceResources->cookedScene.init(*this, *_scene);
 
 	const char *defines[] = {"FRAMEBUFFER_SRGB"};
@@ -246,7 +265,7 @@ pvr::Result OpenGLES3DWaifu::initView()
 	gl::Uniform1i(_defaultUniformLocations[static_cast<uint32_t>(DefaultUniforms::TextureDiffuse)], 0);
 	gl::UseProgram(_deviceResources->programSkinned);
 	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureDiffuse)], 0);
-	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureNormal)], 1);
+	// gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureNormal)], 1);
 	setDefaultOpenglState();
 
 	// Create a buffer/buffers for the skinning data
@@ -260,7 +279,7 @@ pvr::Result OpenGLES3DWaifu::initView()
 				{ 
 					{ "BoneMatrix", pvr::GpuDatatypes::mat4x4 }, 
 					{ "BoneMatrixIT", pvr::GpuDatatypes::mat3x3 } 
-				} 
+				} ,
 			} 
 		});
 	// clang-format on
@@ -268,7 +287,7 @@ pvr::Result OpenGLES3DWaifu::initView()
 	ssboView.init(desc);
 
 	pvr::utils::StructuredMemoryDescription descUbo("Ubo", 1, {{"ViewProjMatrix", pvr::GpuDatatypes::mat4x4}, {"LightPos", pvr::GpuDatatypes::vec3}});
-	
+
 	//UBO(Uniform Buffer Object)
 	_deviceResources->uboView.init(descUbo);
 
@@ -280,6 +299,7 @@ pvr::Result OpenGLES3DWaifu::initView()
 	ssbos.resize(_scene->getNumMeshes());
 
 	for (uint32_t meshId = 0, end = _scene->getNumMeshes(); meshId < end; ++meshId)
+	// uint32_t meshId = 2;
 	{
 		auto &mesh = _scene->getMesh(meshId);
 		if (mesh.getMeshInfo().isSkinned)
@@ -395,7 +415,11 @@ pvr::Result OpenGLES3DWaifu::renderFrame()
 	void *uboData = gl::MapBufferRange(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)_deviceResources->uboView.getSize(), GL_MAP_WRITE_BIT);
 	uboView.pointToMappedMemory(uboData);
 	uboView.getElement(_viewProjectionIdx).setValue(viewProjMatrix);
+#ifdef GLTF_SCENE_FILE
+	uboView.getElement(_lightPositionIdx).setValue(lightpostion);
+#else
 	uboView.getElement(_lightPositionIdx).setValue(_scene->getLightPosition(0));
+#endif
 	gl::UnmapBuffer(GL_UNIFORM_BUFFER);
 
 	// Get a new world view camera and light position
@@ -412,6 +436,7 @@ pvr::Result OpenGLES3DWaifu::renderFrame()
 	// Bind index buffer
 	// Enable/disable vertex attributes
 	for (uint32_t i = 0; i < _scene->getNumMeshNodes(); ++i)
+	//  uint32_t i=2;
 	{
 		renderNode(i, viewProjMatrix, lastMeshRenderedWasSkinned);
 	}
@@ -444,7 +469,7 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 	auto &material = _scene->getMaterial(materialId);
 
 	int32_t diffuseTexId = material.getTextureIndex("DIFFUSETEXTURE");
-	int32_t bumpTexId = material.getTextureIndex("NORMALTEXTURE");
+	int32_t bumpTexId = material.getTextureIndex("NORMALTEXTURE"); //没有，为 -1
 
 	GLuint diffuseTex = _deviceResources->cookedScene.getApiTextureById(diffuseTexId);
 	GLuint vbo = _deviceResources->cookedScene.getVboByMeshId(meshId, 0);
@@ -465,9 +490,11 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 			gl::UseProgram(_deviceResources->programSkinned);
 			lastRenderWasSkinned = true;
 		}
+		/*
 		GLuint normalTex = _deviceResources->cookedScene.getApiTextureById(bumpTexId);
 		gl::ActiveTexture(GL_TEXTURE1);
 		gl::BindTexture(GL_TEXTURE_2D, normalTex);
+		*/
 		gl::ActiveTexture(GL_TEXTURE0);
 
 		for (uint32_t i = 0; i < sizeof(Configuration::SkinnedAttributeSemantics) / sizeof(Configuration::SkinnedAttributeSemantics[0]); ++i)
@@ -479,17 +506,23 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 		debugThrowOnApiError("OpenGLES3DWaifu::renderNode Skinned Setup");
 
 		// Only bone batch 0 supported
+		// _bonesIdx=1;
 		const pvr::assets::Skeleton &skeleton = _scene->getSkeleton(mesh.getSkeletonId());
 
 		const uint32_t numBones = static_cast<uint32_t>(skeleton.bones.size());
+
+		const uint32_t boneCount = mesh.getNumBones();	//影响一个vertex的bone数量
+		gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::BoneCount)], boneCount);
 		gl::BindBuffer(GL_SHADER_STORAGE_BUFFER, _deviceResources->ssbos[meshId]);
 		gl::BindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, _deviceResources->ssbos[meshId]);
 
-		void *bones = gl::MapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(_deviceResources->ssboView.getSize()), GL_MAP_WRITE_BIT);
+		// void *bones = gl::MapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(_deviceResources->ssboView.getSize()), GL_MAP_WRITE_BIT);
+		void *bones = gl::MapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 112 * numBones, GL_MAP_WRITE_BIT);
 		if (!bones)
 		{
 			debugThrowOnApiError("OpenGLES3DWaifu::renderNode Mapping");
 		}
+
 		_deviceResources->ssboView.pointToMappedMemory(bones);
 		auto root = _deviceResources->ssboView;
 		for (uint32_t boneId = 0; boneId < numBones; ++boneId)
@@ -539,7 +572,11 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 		const auto &mvp = viewProjMatrix * mw;
 		const auto &mwit = glm::inverseTranspose(glm::mat3(mw));
 
+#ifdef GLTF_SCENE_FILE
+		auto lp = lightpostion;
+#else
 		auto lp = _scene->getLightPosition(0);
+#endif
 
 		gl::Uniform3fv(_defaultUniformLocations[static_cast<uint32_t>(DefaultUniforms::LightPos)], 1, glm::value_ptr(lp));
 		debugThrowOnApiError("OpenGLES3DWaifu::renderNode Unskinned Set uniforms 0");
