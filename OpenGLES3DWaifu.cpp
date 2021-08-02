@@ -7,12 +7,11 @@
 #include "PVRShell/PVRShell.h"
 #include "PVRUtils/PVRUtilsGles.h"
 #include "PVRUtils/OpenGLES/ModelGles.h"
-// #include "d:\Program Files\Native_SDK-R21.1-v5.7\include\GLES2\gl2ext.h"
 #include <fstream>
 #include <iomanip>
-//#define GL_BGRA_EXT
 // #define GLTF_SCENE_FILE
 
+// 读不出GLTF中的灯光数据
 #ifdef GLTF_SCENE_FILE
 const glm::vec3 lightpostion = glm::vec3(2, 2, -1);
 #endif
@@ -30,29 +29,27 @@ namespace Configuration
 	const char *SkinnedFragShaderFile = "SkinnedFragShader.fsh";
 
 	const char *DefaultAttributeNames[] = {"inVertex", "inNormal", "inTexCoord"};
-	const pvr::StringHash DefaultAttributeSemantics[] = {"POSITION", "NORMAL", "UV0"}; //语义
+	const pvr::StringHash DefaultAttributeSemantics[] = {"POSITION", "NORMAL", "UV0"};
 	const uint16_t DefaultAttributeIndices[] = {0, 1, 2};
 	const char *SkinnedAttributeNames[] = {"inVertex", "inNormal", "inTangent", "inBiNormal", "inTexCoord", "inBoneWeights", "inBoneIndex"};
-	// const char *SkinnedAttributeNames[] = {"inVertex", "inNormal", "inTangent", "inBiNormal", "inTexCoord", "inBoneIndex", "inBoneWeights"};
 	const pvr::StringHash SkinnedAttributeSemantics[] = {"POSITION", "NORMAL", "TANGENT", "BINORMAL", "UV0", "BONEWEIGHT", "BONEINDEX"};
-	// const pvr::StringHash SkinnedAttributeSemantics[] = {"POSITION", "NORMAL", "TANGENT", "BINORMAL", "UV0", "BONEINDEX", "BONEWEIGHT"};
 	const uint16_t SkinnedAttributeIndices[] = {0, 1, 2, 3, 4, 5, 6};
 
 	const char *DefaultUniformNames[] = {"ModelMatrix", "MVPMatrix", "ModelWorldIT3x3", "LightPos", "sTexture"};
 
-	// const char *SkinnedUniformNames[] = {"ViewProjMatrix", "LightPos", "BoneCount", "BoneMatrixArray", "BoneMatrixArrayIT", "sTexture", "sNormalMap"};
-	const char *SkinnedUniformNames[] = {"ViewProjMatrix", "LightPos", "BoneCount", "BoneMatrixArray", "BoneMatrixArrayIT", "sTexture"};
+	const char *SkinnedUniformNames[] = {"ViewProjMatrix", "LightPos", "BoneCount", "sTexture", "s_shadowmap", "isPassLight", "light_ViewProjMatrix"};
 } // namespace Configuration
-// 正好 count 的值就是 Uniforms 的个数，且各uniform对应自己的序号
+
+// 方便统一管理Uniform
 enum class SkinnedUniforms : uint32_t
 {
 	ViewProjMatrix,
 	LightPos,
 	BoneCount,
-	BoneMatrixArray,
-	BoneMatrixArrayIT,
 	TextureDiffuse,
-	// TextureNormal,
+	TextureShadow,
+	isPassLight,
+	light_ViewProjMatrix,
 	Count
 };
 enum class DefaultUniforms : uint32_t
@@ -80,6 +77,8 @@ class OpenGLES3DWaifu : public pvr::Shell
 		std::vector<GLuint> ssbos;
 		pvr::utils::StructuredBufferView uboView;
 		GLuint ubo;
+		GLuint shadowmap_tex;
+		GLuint shadowmap_fbo;
 
 		// UIRenderer used to display text
 		pvr::ui::UIRenderer uiRenderer;
@@ -109,12 +108,23 @@ class OpenGLES3DWaifu : public pvr::Shell
 	pvr::assets::ModelHandle _scene;
 	glm::mat4x4 _projectionMatrix;
 
+	// light matrixes
+	glm::mat4x4 lit_projection;
+	glm::mat4x4 lit_view;
+	glm::mat4x4 light_ViewProjMatrix;
+
 	uint32_t _lightPositionIdx;
 	uint32_t _viewProjectionIdx;
 	uint32_t _boneCountIdx;
 	uint32_t _bonesIdx;
 	uint32_t _boneMatrixIdx;
 	uint32_t _boneMatrixItIdx;
+
+	// 显示窗口以及 shadowmap 的尺寸
+	uint32_t windowHeight;
+	uint32_t windowWidth;
+	uint32_t shadowHeight;
+	uint32_t shadowWidth;
 
 	bool _isPaused;
 
@@ -126,7 +136,7 @@ class OpenGLES3DWaifu : public pvr::Shell
 public:
 	OpenGLES3DWaifu() : _isPaused(false), _currentFrame(0) {}
 
-	void renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatrix, bool &optimizer);
+	void renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatrix, bool &optimizer, bool shadow);
 
 	pvr::Result initApplication();
 	pvr::Result initView();
@@ -163,8 +173,6 @@ void OpenGLES3DWaifu::eventMappedInput(pvr::SimplifiedInput action)
 /// <returns>Return pvr::Result::Success if no error occurred.</returns>
 pvr::Result OpenGLES3DWaifu::initApplication()
 {
-	// 这个模型文件里面包含了动画信息
-	// 读取 gltf 文件时貌似根本就没有针对light数据有收集整合
 	_scene = pvr::assets::loadModel(*this, Configuration::SceneFile);
 
 	// The cameras are stored in the file. We check it contains at least one.
@@ -215,7 +223,7 @@ pvr::Result OpenGLES3DWaifu::initView()
 	}
 
 	GLint vertexShaderStorageBlocks = 0;
-	// 这个函数是用来查询这些参数的
+	// GetIntegerv 可以用来查询参数
 	gl::GetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &vertexShaderStorageBlocks);
 
 	if (vertexShaderStorageBlocks < 1)
@@ -224,19 +232,28 @@ pvr::Result OpenGLES3DWaifu::initView()
 		return pvr::Result::UnsupportedRequest;
 	}
 
+	windowHeight = getHeight();
+	windowWidth = getWidth();
+
+	// 理论上越大深度缓存越细腻，表现越好
+	// 但性能会影响并且大小有上限
+	shadowHeight = windowHeight * 10;
+	shadowWidth = windowWidth * 10;
 	{
 		glm::vec3 from, to, up(0.0f, 1.0f, 0.0f);
-		float fov, nearClip, farClip;										  //fov 表示视野大小 0-180
+		float fov, nearClip, farClip;
 		_scene->getCameraProperties(0, fov, from, to, up, nearClip, farClip); // vTo is calculated from the rotation
 
-		_projectionMatrix = pvr::math::perspective(pvr::Api::OpenGLES31, fov, static_cast<float>(getWidth()) / static_cast<float>(getHeight()), nearClip, farClip);
+		_projectionMatrix = pvr::math::perspective(pvr::Api::OpenGLES31, fov, static_cast<float>(windowWidth) / static_cast<float>(windowHeight), nearClip, farClip);
+		lit_projection = pvr::math::perspective(pvr::Api::OpenGLES31, 1.0, static_cast<float>(shadowWidth) / static_cast<float>(shadowHeight), nearClip, farClip);
+		// lit_projection = glm::ortho<float>(-10, 10, -10, 10, -10, 20); // 平行光 正交矩阵
 	}
 
 	/* 
 	 * 模型初始化
-	 * 其中会载入并存储纹理 TexStorage2D
-	 * 纹理格式只能为：
-	 * 纹理编码有限定，不能是 GL_BGRA_EXT(BGRA8888)
+	 * 其中会载入并存储纹理 TexStorage2D()
+	 * 纹理编码有限定，不能是 BGRA
+	 * 因此纹理格式只能为：KTX PVR
 	 */
 	_deviceResources->cookedScene.init(*this, *_scene);
 
@@ -261,16 +278,17 @@ pvr::Result OpenGLES3DWaifu::initView()
 	{
 		_skinnedUniformLocations[i] = gl::GetUniformLocation(_deviceResources->programSkinned, Configuration::SkinnedUniformNames[i]);
 	}
+
+	// 启用samplers
 	gl::UseProgram(_deviceResources->programDefault);
 	gl::Uniform1i(_defaultUniformLocations[static_cast<uint32_t>(DefaultUniforms::TextureDiffuse)], 0);
 	gl::UseProgram(_deviceResources->programSkinned);
 	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureDiffuse)], 0);
-	// gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureNormal)], 1);
+	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureShadow)], 1);
 	setDefaultOpenglState();
 
 	// Create a buffer/buffers for the skinning data
-
-	_deviceResources->uiRenderer.init(getWidth(), getHeight(), isFullScreen(), getBackBufferColorspace() == pvr::ColorSpace::sRGB);
+	_deviceResources->uiRenderer.init(windowWidth, windowHeight, isFullScreen(), getBackBufferColorspace() == pvr::ColorSpace::sRGB);
 	// clang-format off
 	// SSBO(Shader Storage Buffer Object)
 	pvr::utils::StructuredMemoryDescription desc(
@@ -299,7 +317,6 @@ pvr::Result OpenGLES3DWaifu::initView()
 	ssbos.resize(_scene->getNumMeshes());
 
 	for (uint32_t meshId = 0, end = _scene->getNumMeshes(); meshId < end; ++meshId)
-	// uint32_t meshId = 2;
 	{
 		auto &mesh = _scene->getMesh(meshId);
 		if (mesh.getMeshInfo().isSkinned)
@@ -310,6 +327,7 @@ pvr::Result OpenGLES3DWaifu::initView()
 
 			gl::GenBuffers(static_cast<GLsizei>(1), &ssboMesh);
 
+			// ssboView size由最后一个mesh决定
 			ssboView.setLastElementArraySize(static_cast<uint32_t>(skeleton.bones.size()));
 
 			gl::BindBuffer(GL_SHADER_STORAGE_BUFFER, ssboMesh);
@@ -327,12 +345,45 @@ pvr::Result OpenGLES3DWaifu::initView()
 	_viewProjectionIdx = _deviceResources->uboView.getIndex("ViewProjMatrix");
 	_lightPositionIdx = _deviceResources->uboView.getIndex("LightPos");
 
-	_deviceResources->uiRenderer.getDefaultTitle()->setText("Skinning");
+	_deviceResources->uiRenderer.getDefaultTitle()->setText("OpenGLES3DWaifu");
 	_deviceResources->uiRenderer.getDefaultTitle()->commitUpdates();
-	_deviceResources->uiRenderer.getDefaultDescription()->setText("Skinning with Normal Mapped Per Pixel Lighting");
+	_deviceResources->uiRenderer.getDefaultDescription()->setText("keqing");
 	_deviceResources->uiRenderer.getDefaultDescription()->commitUpdates();
 	_deviceResources->uiRenderer.getDefaultControls()->setText("Any Action Key : Pause");
 	_deviceResources->uiRenderer.getDefaultControls()->commitUpdates();
+
+	/* 创建深度纹理与帧缓存 */
+	// 创建并绑定一个纹理对象
+	gl::GenTextures(1, &_deviceResources->shadowmap_tex);
+	gl::UseProgram(_deviceResources->programSkinned);
+	gl::ActiveTexture(GL_TEXTURE1);
+	gl::BindTexture(GL_TEXTURE_2D, _deviceResources->shadowmap_tex);
+
+	gl::TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	gl::TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	gl::TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	gl::TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	// 设置纹理对象的数据，因为是作为渲染目标，因此这时没有数据
+	// 必须在 BindTexture 之后才可以使用 TexImage2D
+	// 使用GL_DEPTH_COMPONENT32F和GL_DEPTH_COMPONENT选项表明作为深度纹理
+	// internalFormat, format and type 必须匹配。不同于OpenGL，只有GL_DEPTH_COMPONENT32F才可以是GL_FLOAT
+	gl::TexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, shadowWidth, shadowHeight, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+
+	// 创建并绑定帧缓冲对象
+	gl::GenFramebuffers(1, &_deviceResources->shadowmap_fbo);
+	gl::BindFramebuffer(GL_FRAMEBUFFER, _deviceResources->shadowmap_fbo);
+
+	GLenum drawbuffers[] = {GL_NONE};
+	gl::DrawBuffers(1, drawbuffers);
+
+	// 将创建的纹理对象绑定到帧缓冲区
+	// GL_DEPTH_ATTACHMENT参数表明作为深度缓冲
+	gl::FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _deviceResources->shadowmap_tex, 0);
+	gl::ActiveTexture(GL_TEXTURE1);
+	gl::BindTexture(GL_TEXTURE_2D, _deviceResources->shadowmap_tex);
+
+	gl::BindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	return pvr::Result::Success;
 }
@@ -394,6 +445,13 @@ pvr::Result OpenGLES3DWaifu::renderFrame()
 
 		viewMatrix = glm::lookAt(from, to, up);
 		viewProjMatrix = _projectionMatrix * viewMatrix;
+
+		// 以光源为摄像机
+		from = glm::vec3(900.0, 900.0, 0.0);
+		to = glm::vec3(0.0);
+		up = glm::vec3(-1.0, 1.0, 0.0);
+		lit_view = glm::lookAt(from, to, up);
+		light_ViewProjMatrix = lit_projection * lit_view;
 	}
 
 	gl::ClearColor(_clearColor.r, _clearColor.g, _clearColor.b, 1.f);
@@ -414,7 +472,6 @@ pvr::Result OpenGLES3DWaifu::renderFrame()
 	gl::BindBufferBase(GL_UNIFORM_BUFFER, 0, _deviceResources->ubo);
 	void *uboData = gl::MapBufferRange(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)_deviceResources->uboView.getSize(), GL_MAP_WRITE_BIT);
 	uboView.pointToMappedMemory(uboData);
-	uboView.getElement(_viewProjectionIdx).setValue(viewProjMatrix);
 #ifdef GLTF_SCENE_FILE
 	uboView.getElement(_lightPositionIdx).setValue(lightpostion);
 #else
@@ -435,16 +492,48 @@ pvr::Result OpenGLES3DWaifu::renderFrame()
 	// Bind vertex buffer
 	// Bind index buffer
 	// Enable/disable vertex attributes
+
+	// 渲染深度数据到帧缓存，存为深度纹理
+	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::isPassLight)], 1);
+	gl::UniformMatrix4fv(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::light_ViewProjMatrix)], 1, GL_FALSE, glm::value_ptr(light_ViewProjMatrix));
+	uboView.getElement(_viewProjectionIdx).setValue(light_ViewProjMatrix);	//以灯光为摄像头
+
+	// 激活并清空帧缓冲
+	gl::BindFramebuffer(GL_FRAMEBUFFER, _deviceResources->shadowmap_fbo);
+	gl::UseProgram(_deviceResources->programSkinned);
+	gl::Viewport(0, 0, shadowWidth, shadowHeight);	//重要，每次都需要重设否则深度纹理不完整
+	gl::ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	gl::Clear(GL_DEPTH_BUFFER_BIT);
+	gl::ColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);	//不需要颜色数据
+
 	for (uint32_t i = 0; i < _scene->getNumMeshNodes(); ++i)
-	//  uint32_t i=2;
 	{
-		renderNode(i, viewProjMatrix, lastMeshRenderedWasSkinned);
+		renderNode(i, viewProjMatrix, lastMeshRenderedWasSkinned, 1);
+	}
+
+	// 渲染到窗口
+	// 解除刚才绑定的缓冲区对象，默认绘制到系统离屏缓冲
+	gl::BindFramebuffer(GL_FRAMEBUFFER, 0);
+	gl::Viewport(0, 0, windowWidth, windowHeight);
+	gl::Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::isPassLight)], 0);
+	uboView.getElement(_viewProjectionIdx).setValue(viewProjMatrix);	//回到摄像头
+	gl::UniformMatrix4fv(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::light_ViewProjMatrix)], 1, GL_FALSE, glm::value_ptr(light_ViewProjMatrix));
+
+	// 设置纹理对象（做采样对比Z值绘制阴影时使用）
+	gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::TextureShadow)], 1);
+	gl::ActiveTexture(GL_TEXTURE1);
+	gl::BindTexture(GL_TEXTURE_2D, _deviceResources->shadowmap_tex);
+
+	gl::ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	for (uint32_t i = 0; i < _scene->getNumMeshNodes(); ++i)
+	{
+		renderNode(i, viewProjMatrix, lastMeshRenderedWasSkinned, 0);
 	}
 
 	_deviceResources->uiRenderer.beginRendering();
 	_deviceResources->uiRenderer.getDefaultDescription()->render();
 	_deviceResources->uiRenderer.getDefaultTitle()->render();
-	_deviceResources->uiRenderer.getSdkLogo()->render();
 	_deviceResources->uiRenderer.getDefaultControls()->render();
 	_deviceResources->uiRenderer.endRendering();
 
@@ -458,7 +547,7 @@ pvr::Result OpenGLES3DWaifu::renderFrame()
 	return pvr::Result::Success;
 }
 
-void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatrix, bool &lastRenderWasSkinned)
+void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatrix, bool &lastRenderWasSkinned, bool shadow)
 {
 	debugThrowOnApiError("OpenGLES3DWaifu::renderNode Enter");
 	auto &node = _scene->getNode(nodeId);
@@ -475,6 +564,7 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 	GLuint vbo = _deviceResources->cookedScene.getVboByMeshId(meshId, 0);
 	GLuint ibo = _deviceResources->cookedScene.getIboByMeshId(meshId);
 
+	gl::ActiveTexture(GL_TEXTURE0);
 	gl::BindTexture(GL_TEXTURE_2D, diffuseTex);
 	gl::BindBuffer(GL_ARRAY_BUFFER, vbo);
 	gl::BindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
@@ -490,12 +580,6 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 			gl::UseProgram(_deviceResources->programSkinned);
 			lastRenderWasSkinned = true;
 		}
-		/*
-		GLuint normalTex = _deviceResources->cookedScene.getApiTextureById(bumpTexId);
-		gl::ActiveTexture(GL_TEXTURE1);
-		gl::BindTexture(GL_TEXTURE_2D, normalTex);
-		*/
-		gl::ActiveTexture(GL_TEXTURE0);
 
 		for (uint32_t i = 0; i < sizeof(Configuration::SkinnedAttributeSemantics) / sizeof(Configuration::SkinnedAttributeSemantics[0]); ++i)
 		{
@@ -505,17 +589,19 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 		}
 		debugThrowOnApiError("OpenGLES3DWaifu::renderNode Skinned Setup");
 
-		// Only bone batch 0 supported
-		// _bonesIdx=1;
 		const pvr::assets::Skeleton &skeleton = _scene->getSkeleton(mesh.getSkeletonId());
 
 		const uint32_t numBones = static_cast<uint32_t>(skeleton.bones.size());
 
-		const uint32_t boneCount = mesh.getNumBones();	//影响一个vertex的bone数量
+		const uint32_t boneCount = mesh.getNumBones(); //影响一个vertex的bone数量
+													   // if (1 == shadow)
+													   // 	gl::Uniform1i(_shadowUniformLocations[static_cast<uint32_t>(SkinnedUniforms::BoneCount)], boneCount);
+													   // else
 		gl::Uniform1i(_skinnedUniformLocations[static_cast<uint32_t>(SkinnedUniforms::BoneCount)], boneCount);
 		gl::BindBuffer(GL_SHADER_STORAGE_BUFFER, _deviceResources->ssbos[meshId]);
 		gl::BindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, _deviceResources->ssbos[meshId]);
 
+		
 		// void *bones = gl::MapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(_deviceResources->ssboView.getSize()), GL_MAP_WRITE_BIT);
 		void *bones = gl::MapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 112 * numBones, GL_MAP_WRITE_BIT);
 		if (!bones)
@@ -537,6 +623,7 @@ void OpenGLES3DWaifu::renderNode(uint32_t nodeId, const glm::mat4 &viewProjMatri
 		gl::UnmapBuffer(GL_SHADER_STORAGE_BUFFER);
 
 		debugThrowOnApiError("OpenGLES3DWaifu::renderNode Skinned Set uniforms");
+
 		gl::DrawElements(GL_TRIANGLES, mesh.getNumFaces() * 3, pvr::utils::convertToGles(mesh.getFaces().getDataType()), reinterpret_cast<const void *>(0));
 		debugThrowOnApiError("OpenGLES3DWaifu::renderNode Skinned Draw");
 	}

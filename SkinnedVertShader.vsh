@@ -50,6 +50,8 @@ layout (std140, binding = 0) buffer MyBBlock
 };
 
 uniform int BoneCount;	// 每vertex受几个bone影响
+uniform highp mat4 light_ViewProjMatrix;
+uniform int isPassLight;
 
 out highp vec3 vLight;
 out mediump vec2 vTexCoord;
@@ -60,11 +62,18 @@ out mediump float vOneOverAttenuation;
 out highp vec3 transPos;	//未归一化的世界三维坐标
 out highp vec3 LightPosition;
 out highp   vec3 transNormal;
+out highp vec4 v_shadowcoord;
 
-const highp vec3 LP=vec3(1000.0);
+const highp vec3 LP=vec3(1000.0);	// 自己设置的灯光位置（世界坐标）
 
 void main()
 {
+	/* Bias matrix used to map values from a range <-1, 1> (eye space coordinates) to <0, 1> (texture coordinates). */
+    const mat4 bias = mat4(0.5, 0.0, 0.0, 0.0,
+                          0.0, 0.5, 0.0, 0.0,
+                          0.0, 0.0, 0.5, 0.0,
+                          0.5, 0.5, 0.5, 1.0);
+	
 	// On PowerVR GPUs it is possible to index the components of a vector
 	// with the [] operator. However this can cause trouble with PC
 	// emulation on some hardware so we "rotate" the vectors instead.
@@ -91,17 +100,19 @@ void main()
 		// "rotate" the vector components 不断循环位移
 		boneIndex = boneIndex.yzwx;
 		boneWeights = boneWeights.yzwx;
-		// boneIndex = boneIndex.yzx;
-		// boneWeights = boneWeights.yzx;
 	}
-	transPos=position.xyz;	//未归一化的世界三维坐标
+	transPos=position.xyz;	//未归一化的世界三维位置矢量
 
-	worldPosition = position.xyz / position.w;
+	worldPosition = position.xyz / position.w;	//归一化世界四维位置矢量
 
-	gl_Position = ViewProjMatrix * position;
-	// gl_Position = ViewProjMatrix * vec4(inVertex, 1.0);
+	if (1==isPassLight)
+		gl_Position = light_ViewProjMatrix * position;
+	else
+		gl_Position = ViewProjMatrix * position;
+	v_shadowcoord=light_ViewProjMatrix*position;	//未归一化
 
 	// lighting
+	// 这里没有用主程序传入的灯光位置 LightPos
 	mediump vec3 tmpLightDir = LP - position.xyz;
 	mediump float light_distance = length(tmpLightDir);
 	tmpLightDir /= light_distance;
